@@ -15,6 +15,12 @@ from tessera.services.schema_diff import (
     check_compatibility,
     diff_schemas,
 )
+from tessera.services.schema_validator import (
+    SchemaValidationError,
+    check_schema_validity,
+    validate_json_schema,
+    validate_schema_or_raise,
+)
 
 __all__ = [
     # Schema diffing
@@ -23,6 +29,11 @@ __all__ = [
     "SchemaDiffResult",
     "check_compatibility",
     "diff_schemas",
+    # Schema validation
+    "SchemaValidationError",
+    "check_schema_validity",
+    "validate_json_schema",
+    "validate_schema_or_raise",
     # Audit logging
     "AuditAction",
     "log_event",

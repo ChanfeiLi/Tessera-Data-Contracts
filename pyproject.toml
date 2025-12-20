@@ -16,6 +16,7 @@ dependencies = [
     "alembic>=1.14.0",
     "pyyaml>=6.0.0",
     "greenlet>=3.3.0",
+    "jsonschema>=4.20.0",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +46,8 @@ strict = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.22.0",
+]

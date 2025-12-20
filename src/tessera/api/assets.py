@@ -15,6 +15,7 @@ from tessera.services import (
     diff_schemas,
     log_contract_published,
     log_proposal_created,
+    validate_json_schema,
 )
 
 router = APIRouter()
@@ -120,6 +121,18 @@ async def create_contract(
     result = await session.execute(select(TeamDB).where(TeamDB.id == published_by))
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Publisher team not found")
+
+    # Validate schema is valid JSON Schema
+    is_valid, errors = validate_json_schema(contract.schema_def)
+    if not is_valid:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_SCHEMA",
+                "message": "Invalid JSON Schema",
+                "errors": errors,
+            },
+        )
 
     # Get current active contract
     result = await session.execute(
@@ -263,6 +276,18 @@ async def analyze_impact(
     Compares the proposed schema against the current active contract
     and identifies breaking changes and impacted consumers.
     """
+    # Validate proposed schema is valid JSON Schema
+    is_valid, errors = validate_json_schema(proposed_schema)
+    if not is_valid:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_SCHEMA",
+                "message": "Invalid JSON Schema",
+                "errors": errors,
+            },
+        )
+
     # Verify asset exists
     result = await session.execute(select(AssetDB).where(AssetDB.id == asset_id))
     asset = result.scalar_one_or_none()
