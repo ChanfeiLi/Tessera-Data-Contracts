@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tessera.db import TeamDB, get_session
@@ -20,7 +21,11 @@ async def create_team(
     """Create a new team."""
     db_team = TeamDB(name=team.name, metadata_=team.metadata)
     session.add(db_team)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=f"Team with name '{team.name}' already exists")
     await session.refresh(db_team)
     return db_team
 
