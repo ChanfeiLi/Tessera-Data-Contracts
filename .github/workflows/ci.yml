@@ -112,3 +112,33 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/tessera
         run: uv run pytest tests/ -v
+
+  docker:
+    name: Docker Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start services
+        run: docker compose up -d --build --wait
+
+      - name: Check API health
+        run: |
+          for i in {1..30}; do
+            if curl -f http://localhost:8000/health; then
+              echo "API is healthy"
+              exit 0
+            fi
+            echo "Waiting for API... ($i/30)"
+            sleep 2
+          done
+          echo "API health check failed"
+          docker compose logs
+          exit 1
+
+      - name: Run quickstart example
+        run: docker compose exec -T api python examples/quickstart.py
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
