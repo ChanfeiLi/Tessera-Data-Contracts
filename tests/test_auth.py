@@ -36,6 +36,8 @@ def drop_tables(connection):
 @pytest.fixture
 async def auth_test_engine():
     """Create a test database engine for auth tests."""
+    from tessera.db.database import dispose_engine
+
     connect_args = {}
     if _USE_SQLITE:
         connect_args = {"check_same_thread": False}
@@ -47,6 +49,8 @@ async def auth_test_engine():
     )
     yield engine
     await engine.dispose()
+    # Also dispose the global engine if it was created
+    await dispose_engine()
 
 
 @pytest.fixture
@@ -155,7 +159,6 @@ class TestAPIKeyGeneration:
 class TestAPIKeyService:
     """Tests for API key service."""
 
-    @pytest.mark.anyio
     async def test_create_api_key(self, auth_session: AsyncSession):
         """Test creating an API key."""
         # Create a team first
@@ -177,7 +180,6 @@ class TestAPIKeyService:
         assert APIKeyScope.READ in api_key.scopes
         assert APIKeyScope.WRITE in api_key.scopes
 
-    @pytest.mark.anyio
     async def test_create_api_key_team_not_found(self, auth_session: AsyncSession):
         """Test creating an API key for non-existent team."""
         from uuid import uuid4
@@ -195,7 +197,6 @@ class TestAPIKeyService:
 class TestAuthEndpoints:
     """Tests for authentication on endpoints."""
 
-    @pytest.mark.anyio
     async def test_unauthenticated_request_rejected(self, auth_client: AsyncClient):
         """Test that unauthenticated requests are rejected."""
         # Try to create an asset without auth
@@ -211,7 +212,6 @@ class TestAuthEndpoints:
         # App uses custom error handler that wraps in {"error": {...}}
         assert data["error"]["code"] == "MISSING_API_KEY"
 
-    @pytest.mark.anyio
     async def test_invalid_api_key_rejected(self, auth_client: AsyncClient):
         """Test that invalid API keys are rejected."""
         response = await auth_client.post(
@@ -227,7 +227,6 @@ class TestAuthEndpoints:
         # App uses custom error handler that wraps in {"error": {...}}
         assert data["error"]["code"] == "INVALID_API_KEY"
 
-    @pytest.mark.anyio
     async def test_health_endpoints_no_auth(self, auth_client: AsyncClient):
         """Test that health endpoints don't require auth."""
         response = await auth_client.get("/health")
@@ -239,7 +238,6 @@ class TestAuthEndpoints:
         response = await auth_client.get("/health/live")
         assert response.status_code == 200
 
-    @pytest.mark.anyio
     async def test_read_endpoints_no_auth(self, auth_client: AsyncClient):
         """Test that GET endpoints don't require auth."""
         # List teams (read operation)
@@ -254,7 +252,6 @@ class TestAuthEndpoints:
 class TestBootstrapKey:
     """Tests for bootstrap API key functionality."""
 
-    @pytest.mark.anyio
     async def test_bootstrap_key_creates_team(self, auth_test_engine):
         """Test that bootstrap key can create first team."""
         from tessera.db import database

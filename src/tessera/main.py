@@ -20,7 +20,7 @@ from tessera.api.errors import (
 )
 from tessera.config import settings
 from tessera.db import init_db
-from tessera.db.database import async_session
+from tessera.db.database import dispose_engine, get_async_session_maker
 
 
 @asynccontextmanager
@@ -28,6 +28,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
     await init_db()
     yield
+    # Clean up database connections on shutdown
+    await dispose_engine()
 
 
 app = FastAPI(
@@ -79,6 +81,7 @@ async def health() -> dict[str, str]:
 async def health_ready() -> dict[str, str | bool]:
     """Readiness probe - verifies database connectivity."""
     try:
+        async_session = get_async_session_maker()
         async with async_session() as session:
             await session.execute(text("SELECT 1"))
         return {"status": "ready", "database": True}

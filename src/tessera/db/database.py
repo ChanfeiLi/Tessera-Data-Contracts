@@ -27,8 +27,34 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from tessera.config import settings
 from tessera.db.models import Base
 
-engine = create_async_engine(settings.database_url, echo=False)
-async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+# Lazy engine initialization to avoid creating connections at import time
+_engine = None
+_async_session = None
+
+
+def get_engine():
+    """Get or create the database engine (lazy initialization)."""
+    global _engine
+    if _engine is None:
+        _engine = create_async_engine(settings.database_url, echo=False)
+    return _engine
+
+
+def get_async_session_maker():
+    """Get or create the async session maker."""
+    global _async_session
+    if _async_session is None:
+        _async_session = async_sessionmaker(get_engine(), class_=AsyncSession, expire_on_commit=False)
+    return _async_session
+
+
+async def dispose_engine():
+    """Dispose of the database engine and clean up connections."""
+    global _engine, _async_session
+    if _engine is not None:
+        await _engine.dispose()
+        _engine = None
+        _async_session = None
 
 
 async def init_db() -> None:
@@ -37,6 +63,7 @@ async def init_db() -> None:
     Note: This function requires PostgreSQL. For SQLite, use Alembic migrations
     which handle schema differences automatically.
     """
+    engine = get_engine()
     async with engine.begin() as conn:
         # Create schemas first (required for table creation)
         # These statements will fail on SQLite - use Alembic migrations instead
@@ -56,6 +83,7 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
     For multi-step atomic operations, use session.begin_nested() for savepoints.
     """
+    async_session = get_async_session_maker()
     async with async_session() as session:
         try:
             yield session

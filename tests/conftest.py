@@ -33,12 +33,6 @@ _USE_SQLITE = TEST_DATABASE_URL.startswith("sqlite")
 
 
 @pytest.fixture
-def anyio_backend() -> str:
-    """Use asyncio for async tests."""
-    return "asyncio"
-
-
-@pytest.fixture
 async def test_engine():
     """Create a test database engine."""
     connect_args = {}
