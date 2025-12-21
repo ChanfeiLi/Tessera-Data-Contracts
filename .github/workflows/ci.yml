@@ -56,6 +56,7 @@ jobs:
   test-sqlite:
     name: Test (SQLite)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -70,19 +71,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      - name: Run tests with coverage (SQLite)
+      - name: Run tests (SQLite)
         env:
           DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-        run: uv run pytest tests/ --cov=tessera --cov-report=xml --cov-report=term-missing -v
-        timeout-minutes: 5
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: uv run pytest tests/ -v
 
   test-postgres:
     name: Test (PostgreSQL)
