@@ -9,8 +9,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 
 # Copy project files
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
+COPY examples/ ./examples/
 
 # Install dependencies
 RUN uv sync --frozen --no-dev
@@ -22,6 +23,7 @@ WORKDIR /app
 # Copy installed packages from builder
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
+COPY --from=builder /app/examples /app/examples
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH"
