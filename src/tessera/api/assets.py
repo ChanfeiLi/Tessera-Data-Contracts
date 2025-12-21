@@ -36,6 +36,7 @@ from tessera.services import (
     log_proposal_created,
     validate_json_schema,
 )
+from tessera.services.webhooks import send_proposal_created
 
 router = APIRouter()
 
@@ -298,7 +299,8 @@ async def create_contract(
 
     # Verify publisher team exists
     team_result = await session.execute(select(TeamDB).where(TeamDB.id == published_by))
-    if not team_result.scalar_one_or_none():
+    publisher_team = team_result.scalar_one_or_none()
+    if not publisher_team:
         raise HTTPException(status_code=404, detail="Publisher team not found")
 
     # Validate schema is valid JSON Schema
@@ -423,7 +425,33 @@ async def create_contract(
         breaking_changes=[bc.to_dict() for bc in breaking_changes],
     )
 
-    # TODO: Notify consumers via webhook
+    # Get impacted consumers (active registrations for current contract)
+    impacted_consumers: list[dict[str, Any]] = []
+    if current_contract:
+        reg_result = await session.execute(
+            select(RegistrationDB, TeamDB)
+            .join(TeamDB, RegistrationDB.consumer_team_id == TeamDB.id)
+            .where(RegistrationDB.contract_id == current_contract.id)
+            .where(RegistrationDB.status == RegistrationStatus.ACTIVE)
+        )
+        for reg, team in reg_result.all():
+            impacted_consumers.append({
+                "team_id": team.id,
+                "team_name": team.name,
+                "pinned_version": reg.pinned_version,
+            })
+
+    # Notify consumers via webhook
+    await send_proposal_created(
+        proposal_id=db_proposal.id,
+        asset_id=asset_id,
+        asset_fqn=asset.fqn,
+        producer_team_id=publisher_team.id,
+        producer_team_name=publisher_team.name,
+        proposed_version=contract.version,
+        breaking_changes=[bc.to_dict() for bc in breaking_changes],
+        impacted_consumers=impacted_consumers,
+    )
 
     return {
         "action": "proposal_created",

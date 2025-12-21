@@ -26,6 +26,7 @@ from tessera.models.enums import (
     ProposalStatus,
     RegistrationStatus,
 )
+from tessera.models.webhook import WebhookEventType
 from tessera.services import (
     log_contract_published,
     log_proposal_acknowledged,
@@ -34,6 +35,11 @@ from tessera.services import (
     log_proposal_rejected,
 )
 from tessera.services.schema_validator import SchemaValidationError, validate_schema_or_raise
+from tessera.services.webhooks import (
+    send_contract_published,
+    send_proposal_acknowledged,
+    send_proposal_status_change,
+)
 
 router = APIRouter()
 
@@ -310,14 +316,28 @@ async def acknowledge_proposal(
     If the acknowledgment response is 'blocked', the proposal is rejected.
     If all registered consumers have acknowledged (non-blocked), the proposal is auto-approved.
     """
-    # Verify proposal exists
-    result = await session.execute(select(ProposalDB).where(ProposalDB.id == proposal_id))
-    proposal = result.scalar_one_or_none()
-    if not proposal:
+    # Verify proposal exists and get asset info
+    result = await session.execute(
+        select(ProposalDB, AssetDB)
+        .join(AssetDB, ProposalDB.asset_id == AssetDB.id)
+        .where(ProposalDB.id == proposal_id)
+    )
+    row = result.one_or_none()
+    if not row:
         raise HTTPException(status_code=404, detail="Proposal not found")
+    proposal: ProposalDB = row[0]
+    asset: AssetDB = row[1]
 
     if proposal.status != ProposalStatus.PENDING:
         raise HTTPException(status_code=400, detail="Proposal is not pending")
+
+    # Get consumer team info
+    team_result = await session.execute(
+        select(TeamDB).where(TeamDB.id == ack.consumer_team_id)
+    )
+    consumer_team = team_result.scalar_one_or_none()
+    if not consumer_team:
+        raise HTTPException(status_code=404, detail="Consumer team not found")
 
     # Check for duplicate acknowledgment from same team
     result = await session.execute(
@@ -349,6 +369,9 @@ async def acknowledge_proposal(
         notes=ack.notes,
     )
 
+    # Check current acknowledgment counts before status change
+    all_acknowledged, ack_count = await check_proposal_completion(proposal, session)
+
     # Handle rejection if consumer blocks
     if ack.response == AcknowledgmentResponseType.BLOCKED:
         proposal.status = ProposalStatus.REJECTED
@@ -360,10 +383,33 @@ async def acknowledge_proposal(
             proposal_id=proposal_id,
             blocked_by=ack.consumer_team_id,
         )
+        # Send webhook for rejection
+        await send_proposal_status_change(
+            event_type=WebhookEventType.PROPOSAL_REJECTED,
+            proposal_id=proposal_id,
+            asset_id=asset.id,
+            asset_fqn=asset.fqn,
+            status="rejected",
+            actor_team_id=consumer_team.id,
+            actor_team_name=consumer_team.name,
+        )
         return db_ack
 
+    # Send webhook for acknowledgment
+    await send_proposal_acknowledged(
+        proposal_id=proposal_id,
+        asset_id=asset.id,
+        asset_fqn=asset.fqn,
+        consumer_team_id=consumer_team.id,
+        consumer_team_name=consumer_team.name,
+        response=str(ack.response),
+        migration_deadline=ack.migration_deadline,
+        notes=ack.notes,
+        pending_count=ack_count - 1 if not all_acknowledged else 0,
+        acknowledged_count=ack_count,
+    )
+
     # Check for auto-approval (all consumers acknowledged, none blocked)
-    all_acknowledged, ack_count = await check_proposal_completion(proposal, session)
     if all_acknowledged:
         proposal.status = ProposalStatus.APPROVED
         proposal.resolved_at = datetime.now(UTC)
@@ -373,6 +419,14 @@ async def acknowledge_proposal(
             session=session,
             proposal_id=proposal_id,
             acknowledged_count=ack_count,
+        )
+        # Send webhook for auto-approval
+        await send_proposal_status_change(
+            event_type=WebhookEventType.PROPOSAL_APPROVED,
+            proposal_id=proposal_id,
+            asset_id=asset.id,
+            asset_fqn=asset.fqn,
+            status="approved",
         )
 
     return db_ack
@@ -384,10 +438,16 @@ async def withdraw_proposal(
     session: AsyncSession = Depends(get_session),
 ) -> ProposalDB:
     """Withdraw a proposal."""
-    result = await session.execute(select(ProposalDB).where(ProposalDB.id == proposal_id))
-    proposal = result.scalar_one_or_none()
-    if not proposal:
+    result = await session.execute(
+        select(ProposalDB, AssetDB)
+        .join(AssetDB, ProposalDB.asset_id == AssetDB.id)
+        .where(ProposalDB.id == proposal_id)
+    )
+    row = result.one_or_none()
+    if not row:
         raise HTTPException(status_code=404, detail="Proposal not found")
+    proposal: ProposalDB = row[0]
+    asset: AssetDB = row[1]
 
     if proposal.status != ProposalStatus.PENDING:
         raise HTTPException(status_code=400, detail="Proposal is not pending")
@@ -396,6 +456,16 @@ async def withdraw_proposal(
     proposal.resolved_at = datetime.now(UTC)
     await session.flush()
     await session.refresh(proposal)
+
+    # Send webhook for withdrawal
+    await send_proposal_status_change(
+        event_type=WebhookEventType.PROPOSAL_WITHDRAWN,
+        proposal_id=proposal_id,
+        asset_id=asset.id,
+        asset_fqn=asset.fqn,
+        status="withdrawn",
+    )
+
     return proposal
 
 
@@ -406,13 +476,23 @@ async def force_proposal(
     session: AsyncSession = Depends(get_session),
 ) -> ProposalDB:
     """Force-approve a proposal (bypassing consumer acknowledgments)."""
-    result = await session.execute(select(ProposalDB).where(ProposalDB.id == proposal_id))
-    proposal = result.scalar_one_or_none()
-    if not proposal:
+    result = await session.execute(
+        select(ProposalDB, AssetDB)
+        .join(AssetDB, ProposalDB.asset_id == AssetDB.id)
+        .where(ProposalDB.id == proposal_id)
+    )
+    row = result.one_or_none()
+    if not row:
         raise HTTPException(status_code=404, detail="Proposal not found")
+    proposal: ProposalDB = row[0]
+    asset: AssetDB = row[1]
 
     if proposal.status != ProposalStatus.PENDING:
         raise HTTPException(status_code=400, detail="Proposal is not pending")
+
+    # Get actor team info
+    team_result = await session.execute(select(TeamDB).where(TeamDB.id == actor_id))
+    actor_team = team_result.scalar_one_or_none()
 
     proposal.status = ProposalStatus.APPROVED
     proposal.resolved_at = datetime.now(UTC)
@@ -423,6 +503,17 @@ async def force_proposal(
         session=session,
         proposal_id=proposal_id,
         actor_id=actor_id,
+    )
+
+    # Send webhook for force approval
+    await send_proposal_status_change(
+        event_type=WebhookEventType.PROPOSAL_FORCE_APPROVED,
+        proposal_id=proposal_id,
+        asset_id=asset.id,
+        asset_fqn=asset.fqn,
+        status="force_approved",
+        actor_team_id=actor_id,
+        actor_team_name=actor_team.name if actor_team else None,
     )
 
     return proposal
@@ -506,6 +597,23 @@ async def publish_from_proposal(
             version=new_contract.version,
             change_type=str(proposal.change_type),
         )
+
+    # Get publisher team info for webhook
+    publisher_result = await session.execute(
+        select(TeamDB).where(TeamDB.id == publish_request.published_by)
+    )
+    publisher_team = publisher_result.scalar_one_or_none()
+
+    # Send webhook for contract publication
+    await send_contract_published(
+        contract_id=new_contract.id,
+        asset_id=asset.id,
+        asset_fqn=asset.fqn,
+        version=new_contract.version,
+        producer_team_id=publish_request.published_by,
+        producer_team_name=publisher_team.name if publisher_team else "unknown",
+        from_proposal_id=proposal_id,
+    )
 
     return {
         "action": "published",
