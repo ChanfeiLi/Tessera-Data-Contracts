@@ -3,16 +3,24 @@
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tessera.api.auth import Auth, RequireRead
 from tessera.api.errors import ErrorCode, NotFoundError
 from tessera.api.pagination import PaginationParams, paginate, pagination_params
+from tessera.api.rate_limit import limit_read
 from tessera.db import ContractDB, RegistrationDB, get_session
 from tessera.models import Contract, Registration
 from tessera.models.enums import CompatibilityMode, ContractStatus
+from tessera.services.cache import (
+    cache_contract,
+    cache_schema_diff,
+    get_cached_contract,
+    get_cached_schema_diff,
+)
 from tessera.services.schema_diff import diff_schemas
 
 router = APIRouter()
@@ -39,14 +47,21 @@ class ContractCompareResponse(BaseModel):
 
 
 @router.get("")
+@limit_read
 async def list_contracts(
+    request: Request,
+    auth: Auth,
     asset_id: UUID | None = Query(None, description="Filter by asset ID"),
     status: ContractStatus | None = Query(None, description="Filter by status"),
     version: str | None = Query(None, description="Filter by version pattern"),
     params: PaginationParams = Depends(pagination_params),
+    _: None = RequireRead,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """List all contracts with filtering and pagination."""
+    """List all contracts with filtering and pagination.
+
+    Requires read scope.
+    """
     query = select(ContractDB)
     if asset_id:
         query = query.where(ContractDB.asset_id == asset_id)
@@ -60,40 +75,68 @@ async def list_contracts(
 
 
 @router.post("/compare", response_model=ContractCompareResponse)
+@limit_read
 async def compare_contracts(
-    request: ContractCompareRequest,
+    request: Request,
+    compare_req: ContractCompareRequest,
+    auth: Auth,
+    _: None = RequireRead,
     session: AsyncSession = Depends(get_session),
 ) -> ContractCompareResponse:
-    """Compare two contracts and return the differences."""
+    """Compare two contracts and return the differences.
+
+    Requires read scope.
+    """
     # Fetch both contracts
     result1 = await session.execute(
-        select(ContractDB).where(ContractDB.id == request.contract_id_1)
+        select(ContractDB).where(ContractDB.id == compare_req.contract_id_1)
     )
     contract1 = result1.scalar_one_or_none()
     if not contract1:
         raise NotFoundError(
             code=ErrorCode.CONTRACT_NOT_FOUND,
-            message=f"Contract with ID '{request.contract_id_1}' not found",
-            details={"contract_id": str(request.contract_id_1)},
+            message=f"Contract with ID '{compare_req.contract_id_1}' not found",
+            details={"contract_id": str(compare_req.contract_id_1)},
         )
 
     result2 = await session.execute(
-        select(ContractDB).where(ContractDB.id == request.contract_id_2)
+        select(ContractDB).where(ContractDB.id == compare_req.contract_id_2)
     )
     contract2 = result2.scalar_one_or_none()
     if not contract2:
         raise NotFoundError(
             code=ErrorCode.CONTRACT_NOT_FOUND,
-            message=f"Contract with ID '{request.contract_id_2}' not found",
-            details={"contract_id": str(request.contract_id_2)},
+            message=f"Contract with ID '{compare_req.contract_id_2}' not found",
+            details={"contract_id": str(compare_req.contract_id_2)},
         )
 
     # Use specified compatibility mode or default to first contract's mode
-    mode = request.compatibility_mode or contract1.compatibility_mode
+    mode = compare_req.compatibility_mode or contract1.compatibility_mode
 
-    # Perform diff
-    diff_result = diff_schemas(contract1.schema_def, contract2.schema_def)
-    breaking = diff_result.breaking_for_mode(mode)
+    # Try cache first for schema diff
+    cached_diff = await get_cached_schema_diff(contract1.schema_def, contract2.schema_def)
+    if cached_diff:
+        # Use cached diff data
+        change_type_str = cached_diff.get("change_type", "minor")
+        all_changes = cached_diff.get("all_changes", [])
+        # Re-diff to get breaking changes (fast, just checks compatibility)
+        diff_result = diff_schemas(contract1.schema_def, contract2.schema_def)
+        breaking = diff_result.breaking_for_mode(mode)
+    else:
+        # Perform diff
+        diff_result = diff_schemas(contract1.schema_def, contract2.schema_def)
+        breaking = diff_result.breaking_for_mode(mode)
+        # Cache the diff result
+        await cache_schema_diff(
+            contract1.schema_def,
+            contract2.schema_def,
+            {
+                "change_type": str(diff_result.change_type.value),
+                "all_changes": [c.to_dict() for c in diff_result.changes],
+            },
+        )
+        all_changes = [c.to_dict() for c in diff_result.changes]
+        change_type_str = str(diff_result.change_type.value)
 
     return ContractCompareResponse(
         contract_1={
@@ -108,20 +151,32 @@ async def compare_contracts(
             "published_at": contract2.published_at.isoformat(),
             "asset_id": str(contract2.asset_id),
         },
-        change_type=str(diff_result.change_type.value),
+        change_type=change_type_str,
         is_compatible=len(breaking) == 0,
         breaking_changes=[bc.to_dict() for bc in breaking],
-        all_changes=[c.to_dict() for c in diff_result.changes],
+        all_changes=all_changes,
         compatibility_mode=str(mode.value),
     )
 
 
 @router.get("/{contract_id}", response_model=Contract)
+@limit_read
 async def get_contract(
+    request: Request,
     contract_id: UUID,
+    auth: Auth,
+    _: None = RequireRead,
     session: AsyncSession = Depends(get_session),
-) -> ContractDB:
-    """Get a contract by ID."""
+) -> ContractDB | dict[str, Any]:
+    """Get a contract by ID.
+
+    Requires read scope.
+    """
+    # Try cache first
+    cached = await get_cached_contract(str(contract_id))
+    if cached:
+        return cached
+
     result = await session.execute(select(ContractDB).where(ContractDB.id == contract_id))
     contract = result.scalar_one_or_none()
     if not contract:
@@ -130,16 +185,27 @@ async def get_contract(
             message=f"Contract with ID '{contract_id}' not found",
             details={"contract_id": str(contract_id)},
         )
+
+    # Cache result
+    await cache_contract(str(contract_id), Contract.model_validate(contract).model_dump())
+
     return contract
 
 
 @router.get("/{contract_id}/registrations")
+@limit_read
 async def list_contract_registrations(
+    request: Request,
+    auth: Auth,
     contract_id: UUID,
     params: PaginationParams = Depends(pagination_params),
+    _: None = RequireRead,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """List all registrations for a contract."""
+    """List all registrations for a contract.
+
+    Requires read scope.
+    """
     # Verify contract exists
     result = await session.execute(select(ContractDB).where(ContractDB.id == contract_id))
     contract = result.scalar_one_or_none()

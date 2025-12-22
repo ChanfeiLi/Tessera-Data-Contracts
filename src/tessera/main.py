@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 from starlette.exceptions import HTTPException
 
@@ -14,6 +16,8 @@ from tessera.api import (
     assets,
     audit,
     contracts,
+    dependencies,
+    impact,
     proposals,
     registrations,
     schemas,
@@ -29,6 +33,7 @@ from tessera.api.errors import (
     http_exception_handler,
     validation_exception_handler,
 )
+from tessera.api.rate_limit import limiter, rate_limit_exceeded_handler
 from tessera.config import settings
 from tessera.db import init_db
 from tessera.db.database import dispose_engine, get_async_session_maker
@@ -49,16 +54,25 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+# Only add rate limiting middleware if enabled
+if settings.rate_limit_enabled:
+    app.add_middleware(SlowAPIMiddleware)
 
 # Request ID middleware (must be added first to wrap all other middleware)
 app.add_middleware(RequestIDMiddleware)
 
 # CORS middleware
+allow_methods = ["*"]
+if settings.environment == "production":
+    allow_methods = settings.cors_allow_methods
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=allow_methods,
     allow_headers=["*"],
 )
 
@@ -72,6 +86,8 @@ app.add_exception_handler(Exception, generic_exception_handler)
 api_v1 = APIRouter(prefix="/api/v1")
 api_v1.include_router(teams.router, prefix="/teams", tags=["teams"])
 api_v1.include_router(assets.router, prefix="/assets", tags=["assets"])
+api_v1.include_router(dependencies.router, prefix="/assets", tags=["dependencies"])
+api_v1.include_router(impact.router, prefix="/assets", tags=["impact"])
 api_v1.include_router(contracts.router, prefix="/contracts", tags=["contracts"])
 api_v1.include_router(registrations.router, prefix="/registrations", tags=["registrations"])
 api_v1.include_router(proposals.router, prefix="/proposals", tags=["proposals"])

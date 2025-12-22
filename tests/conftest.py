@@ -13,6 +13,11 @@ load_dotenv()
 # Disable auth for tests by default (individual auth tests can override)
 # Must be set before importing any tessera modules
 os.environ["AUTH_DISABLED"] = "true"
+# Disable rate limiting for tests by default
+os.environ["RATE_LIMIT_ENABLED"] = "false"
+# Disable Redis for tests by default (faster, tests should mock Redis when needed)
+if "REDIS_URL" not in os.environ:
+    os.environ["REDIS_URL"] = ""
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -25,10 +30,14 @@ from tessera.main import app
 # Support both PostgreSQL and SQLite
 # SQLite: DATABASE_URL=sqlite+aiosqlite:///./test.db or sqlite+aiosqlite:///:memory:
 # PostgreSQL: DATABASE_URL=postgresql+asyncpg://user:pass@host/db
+# Default to SQLite for fast tests - override with DATABASE_URL env var if needed
 TEST_DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "sqlite+aiosqlite:///:memory:",  # Default to in-memory SQLite for fast tests
 )
+# Ensure DATABASE_URL is set for tests if not already set
+if "DATABASE_URL" not in os.environ:
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
 _USE_SQLITE = TEST_DATABASE_URL.startswith("sqlite")
 
@@ -51,12 +60,43 @@ async def test_engine():
 
 
 def create_tables(connection):
-    """Create all tables, checking if they exist first."""
+    """Create all tables, dropping existing ones first to ensure fresh schema."""
+    # Drop all tables first to ensure we have a clean schema
+    # This is important for PostgreSQL where schema might be stale
+    if not _USE_SQLITE:
+        # Drop all tables with CASCADE first
+        Base.metadata.drop_all(connection)
     Base.metadata.create_all(connection, checkfirst=True)
 
 
 def drop_tables(connection):
     """Drop all tables."""
+    # For PostgreSQL, drop with CASCADE to handle type dependencies
+    if not _USE_SQLITE:
+        # Drop all tables with CASCADE to handle dependencies
+        from sqlalchemy import inspect
+        inspector = inspect(connection)
+        tables = inspector.get_table_names(schema="core")
+        tables.extend(inspector.get_table_names(schema="workflow"))
+        tables.extend(inspector.get_table_names(schema="audit"))
+        for table in tables:
+            try:
+                connection.execute(text(f'DROP TABLE IF EXISTS core."{table}" CASCADE'))
+            except Exception:
+                pass
+            try:
+                connection.execute(text(f'DROP TABLE IF EXISTS workflow."{table}" CASCADE'))
+            except Exception:
+                pass
+            try:
+                connection.execute(text(f'DROP TABLE IF EXISTS audit."{table}" CASCADE'))
+            except Exception:
+                pass
+        # Also drop types that might have dependencies
+        try:
+            connection.execute(text("DROP TYPE IF EXISTS dependencytype CASCADE"))
+        except Exception:
+            pass
     Base.metadata.drop_all(connection)
 
 
