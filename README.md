@@ -10,30 +10,36 @@ The Kafka ecosystem solved producer/consumer coordination with schema registries
 
 ## How It Works
 
+**Without Tessera** — breaking changes break things:
+
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#dc2626', 'primaryTextColor': '#fff', 'primaryBorderColor': '#b91c1c', 'lineColor': '#6b7280', 'noteBkgColor': '#fef2f2', 'noteTextColor': '#7f1d1d', 'noteBorderColor': '#fca5a5', 'actorBkg': '#6b7280', 'actorTextColor': '#f9fafb', 'actorBorder': '#4b5563', 'signalColor': '#6b7280', 'signalTextColor': '#1f2937'}}}%%
 sequenceDiagram
-    participant P as Producer
-    participant T as Tessera
-    participant C as Consumer
+    participant P as 📦 Producer
+    participant C as 👥 Consumer
 
-    P->>T: 1. Create Asset
-    P->>T: 2. Publish Contract v1.0.0
-    C->>T: 3. Register as consumer
+    P->>P: Drop column from table
+    P--xC: 💥 Pipeline fails at 3am
+    Note over C: ❌ No warning<br/>❌ No migration time<br/>❌ Broken dashboards
+    C->>P: 😡 Slack: "Who broke prod?"
+```
 
-    Note over P,C: Time passes...
+**With Tessera** — coordinate before you ship:
 
-    P->>T: 4. Publish breaking change
-    T->>T: Detect breaking change
-    T->>C: 5. Notify affected consumers
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#6366f1', 'primaryTextColor': '#fff', 'primaryBorderColor': '#4f46e5', 'lineColor': '#475569', 'noteBkgColor': '#f0fdf4', 'noteTextColor': '#14532d', 'noteBorderColor': '#86efac', 'actorBkg': '#1e293b', 'actorTextColor': '#f8fafc', 'actorBorder': '#475569', 'signalColor': '#475569', 'signalTextColor': '#0f172a'}}}%%
+sequenceDiagram
+    participant P as 📦 Producer
+    participant T as ⚡ Tessera
+    participant C as 👥 Consumer
 
-    alt Consumer approves
-        C->>T: 6. Acknowledge (approved)
-        T->>P: All acknowledged
-        P->>T: 7. Publish Contract v2.0.0
-    else Consumer blocks
-        C->>T: 6. Acknowledge (blocked)
-        T->>P: Migration required
-    end
+    P->>T: Propose: drop column
+    T-->>T: Detect breaking change
+    T->>C: ⚠️ "Producer wants to drop user_id"
+    C->>T: ✅ Approve (migrated)
+    T->>P: All consumers ready
+    P->>T: Ship v2.0.0
+    Note over P,C: ✓ Zero downtime, no one paged
 ```
 
 **Producers** own assets and publish versioned contracts (JSON Schema + guarantees).
@@ -89,6 +95,10 @@ All endpoints under `/api/v1`. Interactive docs at `/docs`.
 | Admin | API keys, webhooks, audit trail |
 
 Full reference: [docs/api.md](docs/api.md)
+
+## Deployment
+
+Docker Compose, Kubernetes, and Helm deployment options: [docs/deployment.md](docs/deployment.md)
 
 ## Compatibility Modes
 
