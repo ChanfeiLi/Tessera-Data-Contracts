@@ -28,6 +28,10 @@ dependencies = [
     "python-multipart>=0.0.12,<1.0.0",
 ]
 
+[project.urls]
+Documentation = "https://ashita-ai.github.io/tessera"
+Repository = "https://github.com/ashita-ai/tessera"
+
 [project.scripts]
 tessera = "tessera.cli:app"
 

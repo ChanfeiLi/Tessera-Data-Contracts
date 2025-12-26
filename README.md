@@ -60,6 +60,7 @@ uv run uvicorn tessera.main:app --reload
 Full documentation at [ashita-ai.github.io/tessera](https://ashita-ai.github.io/tessera):
 
 - [Quickstart Guide](https://ashita-ai.github.io/tessera/getting-started/quickstart/)
+- [Python SDK](https://ashita-ai.github.io/tessera/guides/python-sdk/) | [PyPI](https://pypi.org/project/tessera-sdk/)
 - [dbt Integration](https://ashita-ai.github.io/tessera/guides/dbt-integration/)
 - [API Reference](https://ashita-ai.github.io/tessera/api/overview/)
 
