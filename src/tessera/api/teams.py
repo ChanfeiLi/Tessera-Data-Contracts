@@ -4,8 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security
-from fastapi.security import APIKeyHeader
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -15,64 +14,17 @@ from tessera.api.auth import Auth, RequireAdmin, RequireRead
 from tessera.api.errors import (
     DuplicateError,
     ErrorCode,
-    ForbiddenError,
     NotFoundError,
-    UnauthorizedError,
 )
 from tessera.api.pagination import PaginationParams, pagination_params
 from tessera.api.rate_limit import limit_read, limit_write
-from tessera.config import settings
 from tessera.db import AssetDB, TeamDB, UserDB, get_session
 from tessera.models import Team, TeamCreate, TeamUpdate, User
-from tessera.models.enums import APIKeyScope
+from tessera.services import audit
+from tessera.services.audit import AuditAction
 from tessera.services.cache import team_cache
 
 router = APIRouter()
-
-# API key header for bootstrap check
-api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
-
-
-async def _verify_can_create_team(
-    authorization: str | None = Security(api_key_header),
-    session: AsyncSession = Depends(get_session),
-) -> None:
-    """Verify the request is authorized to create a team.
-
-    Team creation is allowed if:
-    1. Auth is disabled (development mode)
-    2. Using the bootstrap API key
-    3. Using a valid API key with admin scope
-
-    Raises HTTPException if not authorized.
-    """
-    # Auth disabled = always allowed
-    if settings.auth_disabled:
-        return
-
-    if not authorization:
-        raise UnauthorizedError("Authorization required", code=ErrorCode.UNAUTHORIZED)
-
-    if not authorization.startswith("Bearer "):
-        raise UnauthorizedError("Use 'Bearer <key>' format", code=ErrorCode.UNAUTHORIZED)
-
-    key = authorization[7:]
-
-    # Check bootstrap key
-    if settings.bootstrap_api_key and key == settings.bootstrap_api_key:
-        return
-
-    # Check regular API key with admin scope
-    from tessera.services.auth import validate_api_key
-
-    result = await validate_api_key(session, key)
-    if not result:
-        raise UnauthorizedError("Invalid or expired API key", code=ErrorCode.INVALID_API_KEY)
-
-    api_key_db, _ = result
-    scopes = [APIKeyScope(s) for s in api_key_db.scopes]
-    if APIKeyScope.ADMIN not in scopes:
-        raise ForbiddenError("Admin scope required", code=ErrorCode.INSUFFICIENT_SCOPE)
 
 
 @router.post("", response_model=Team, status_code=201)
@@ -80,7 +32,8 @@ async def _verify_can_create_team(
 async def create_team(
     request: Request,
     team: TeamCreate,
-    _: None = Depends(_verify_can_create_team),
+    auth: Auth,
+    _: None = RequireAdmin,
     session: AsyncSession = Depends(get_session),
 ) -> TeamDB:
     """Create a new team.
@@ -98,6 +51,16 @@ async def create_team(
             f"Team with name '{team.name}' already exists",
         )
     await session.refresh(db_team)
+
+    # Audit log team creation
+    await audit.log_event(
+        session=session,
+        entity_type="team",
+        entity_id=db_team.id,
+        action=AuditAction.TEAM_CREATED,
+        payload={"name": team.name},
+    )
+
     return db_team
 
 
@@ -207,6 +170,19 @@ async def update_team(
 
     await session.flush()
     await session.refresh(team)
+
+    # Audit log team update
+    await audit.log_event(
+        session=session,
+        entity_type="team",
+        entity_id=team_id,
+        action=AuditAction.TEAM_UPDATED,
+        payload={
+            "name": update.name if update.name is not None else None,
+            "metadata_changed": update.metadata is not None,
+        },
+    )
+
     # Invalidate cache
     await team_cache.delete(str(team_id))
     return team
@@ -254,6 +230,15 @@ async def delete_team(
 
     team.deleted_at = datetime.now(UTC)
     await session.flush()
+
+    # Audit log team deletion
+    await audit.log_event(
+        session=session,
+        entity_type="team",
+        entity_id=team_id,
+        action=AuditAction.TEAM_DELETED,
+        payload={"name": team.name, "force": force, "asset_count": asset_count},
+    )
 
     # Invalidate cache
     await team_cache.delete(str(team_id))
