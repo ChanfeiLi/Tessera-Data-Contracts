@@ -6,6 +6,10 @@ Creates:
 - 12 users distributed across teams
 - 220+ assets with contracts from dbt manifest
 - Guarantees inferred from dbt tests (not_null, unique, accepted_values, dbt_utils, etc.)
+- Kafka topics with Avro schemas (demonstrating schema_format="avro")
+- REST API endpoints via /sync/openapi (demonstrating OpenAPI import)
+- GraphQL operations via /sync/graphql (demonstrating GraphQL introspection import)
+- REAL audit results from dbt test runs (WAP pattern - not fake seeded data!)
 - A handful of proposals (breaking changes in progress)
 """
 
@@ -17,7 +21,7 @@ from pathlib import Path
 
 import httpx
 
-API_URL = "http://api:8000"
+API_URL = os.environ.get("TESSERA_API_URL", "http://api:8000")
 BOOTSTRAP_API_KEY = os.environ.get("BOOTSTRAP_API_KEY", "")
 
 
@@ -245,7 +249,7 @@ def import_multi_project_manifests(team_ids: dict[str, str]) -> dict:
     This demonstrates Tessera's multi-project support where different teams
     own different dbt projects.
     """
-    print("\n[4a] Importing multi-project dbt manifests...")
+    print("\n[4/7] Importing multi-project dbt manifests...")
     results = {
         "projects_imported": 0,
         "total_assets": 0,
@@ -301,6 +305,827 @@ def import_multi_project_manifests(team_ids: dict[str, str]) -> dict:
             print(f"    Error: {e}")
 
     return results
+
+
+def create_kafka_assets(team_ids: dict[str, str]) -> int:
+    """Create sample Kafka assets with Avro schemas to demonstrate schema format support.
+
+    This shows how Tessera handles Avro schemas from Kafka topics.
+    """
+    print("\nCreating Kafka assets with Avro schemas...")
+    assets_created = 0
+
+    # Sample Avro schemas representing typical Kafka topics
+    kafka_schemas = [
+        {
+            "fqn": "kafka.events.user_activity",
+            "schema": {
+                "type": "record",
+                "name": "UserActivity",
+                "namespace": "com.company.events",
+                "doc": "User activity events from web and mobile apps",
+                "fields": [
+                    {"name": "event_id", "type": {"type": "string", "logicalType": "uuid"}},
+                    {"name": "user_id", "type": "long"},
+                    {
+                        "name": "event_type",
+                        "type": {
+                            "type": "enum",
+                            "name": "EventType",
+                            "symbols": ["PAGE_VIEW", "CLICK", "PURCHASE", "SIGN_UP"],
+                        },
+                    },
+                    {
+                        "name": "timestamp",
+                        "type": {"type": "long", "logicalType": "timestamp-millis"},
+                    },
+                    {
+                        "name": "properties",
+                        "type": ["null", {"type": "map", "values": "string"}],
+                        "default": None,
+                    },
+                ],
+            },
+            "team": "data-platform",
+        },
+        {
+            "fqn": "kafka.orders.order_created",
+            "schema": {
+                "type": "record",
+                "name": "OrderCreated",
+                "namespace": "com.company.orders",
+                "doc": "Order creation events from the e-commerce platform",
+                "fields": [
+                    {"name": "order_id", "type": {"type": "string", "logicalType": "uuid"}},
+                    {"name": "customer_id", "type": "long"},
+                    {
+                        "name": "items",
+                        "type": {
+                            "type": "array",
+                            "items": {
+                                "type": "record",
+                                "name": "OrderItem",
+                                "fields": [
+                                    {"name": "product_id", "type": "string"},
+                                    {"name": "quantity", "type": "int"},
+                                    {
+                                        "name": "unit_price",
+                                        "type": {
+                                            "type": "bytes",
+                                            "logicalType": "decimal",
+                                            "precision": 10,
+                                            "scale": 2,
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                    {
+                        "name": "total",
+                        "type": {
+                            "type": "bytes",
+                            "logicalType": "decimal",
+                            "precision": 12,
+                            "scale": 2,
+                        },
+                    },
+                    {
+                        "name": "created_at",
+                        "type": {"type": "long", "logicalType": "timestamp-millis"},
+                    },
+                ],
+            },
+            "team": "sales-ops",
+        },
+        {
+            "fqn": "kafka.marketing.campaign_attribution",
+            "schema": {
+                "type": "record",
+                "name": "CampaignAttribution",
+                "namespace": "com.company.marketing",
+                "doc": "Marketing campaign attribution events",
+                "fields": [
+                    {"name": "attribution_id", "type": {"type": "string", "logicalType": "uuid"}},
+                    {"name": "user_id", "type": "long"},
+                    {"name": "campaign_id", "type": "string"},
+                    {
+                        "name": "channel",
+                        "type": {
+                            "type": "enum",
+                            "name": "Channel",
+                            "symbols": ["EMAIL", "SOCIAL", "PAID_SEARCH", "ORGANIC", "DIRECT"],
+                        },
+                    },
+                    {"name": "conversion_value", "type": ["null", "double"], "default": None},
+                    {
+                        "name": "attributed_at",
+                        "type": {"type": "long", "logicalType": "timestamp-millis"},
+                    },
+                ],
+            },
+            "team": "marketing-analytics",
+        },
+    ]
+
+    for kafka_asset in kafka_schemas:
+        team_id = team_ids.get(kafka_asset["team"])
+        if not team_id:
+            print(f"  Skipping {kafka_asset['fqn']}: team not found")
+            continue
+
+        # Create the asset
+        try:
+            asset_resp = httpx.post(
+                f"{API_URL}/api/v1/assets",
+                json={
+                    "fqn": kafka_asset["fqn"],
+                    "owner_team_id": team_id,
+                    "resource_type": "kafka_topic",
+                    "metadata": {"source": "kafka", "format": "avro"},
+                },
+                headers=get_headers(),
+                timeout=10,
+            )
+
+            if asset_resp.status_code == 201:
+                asset = asset_resp.json()
+                asset_id = asset["id"]
+                print(f"  Created asset: {kafka_asset['fqn']}")
+
+                # Publish contract with Avro schema
+                contract_resp = httpx.post(
+                    f"{API_URL}/api/v1/assets/{asset_id}/contracts?published_by={team_id}",
+                    json={
+                        "version": "1.0.0",
+                        "schema": kafka_asset["schema"],
+                        "schema_format": "avro",
+                        "compatibility_mode": "backward",
+                    },
+                    headers=get_headers(),
+                    timeout=30,
+                )
+
+                if contract_resp.status_code == 201:
+                    result = contract_resp.json()
+                    contract = result.get("contract", {})
+                    print(
+                        f"    Published v{contract.get('version', '1.0.0')} (Avro -> JSON Schema)"
+                    )
+                    assets_created += 1
+                else:
+                    print(f"    Failed to publish contract: {contract_resp.status_code}")
+
+            elif asset_resp.status_code == 409:
+                print(f"  Asset exists: {kafka_asset['fqn']}")
+            else:
+                print(f"  Failed to create asset: {asset_resp.status_code}")
+
+        except httpx.RequestError as e:
+            print(f"  Error: {e}")
+
+    return assets_created
+
+
+def import_openapi_spec(team_ids: dict[str, str]) -> int:
+    """Import OpenAPI spec via the /sync/openapi endpoint.
+
+    This demonstrates how Tessera imports REST API contracts from OpenAPI specs.
+    """
+    print("\nImporting OpenAPI spec via /sync/openapi...")
+    assets_created = 0
+
+    team_id = team_ids.get("product-analytics")
+    if not team_id:
+        print("  Skipping: product-analytics team not found")
+        return 0
+
+    # Sample OpenAPI 3.0 spec representing a typical User API
+    openapi_spec = {
+        "openapi": "3.0.0",
+        "info": {
+            "title": "User Service API",
+            "version": "1.0.0",
+            "description": "API for managing users, orders, and products",
+        },
+        "paths": {
+            "/v1/users": {
+                "get": {
+                    "operationId": "listUsers",
+                    "summary": "List all users",
+                    "description": "Returns a paginated list of users",
+                    "responses": {
+                        "200": {
+                            "description": "Success",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/components/schemas/User"},
+                                    }
+                                }
+                            },
+                        }
+                    },
+                },
+                "post": {
+                    "operationId": "createUser",
+                    "summary": "Create a new user",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/CreateUserRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Created",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/User"}
+                                }
+                            },
+                        }
+                    },
+                },
+            },
+            "/v1/users/{id}": {
+                "get": {
+                    "operationId": "getUser",
+                    "summary": "Get a user by ID",
+                    "parameters": [
+                        {
+                            "name": "id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "integer"},
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Success",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/User"}
+                                }
+                            },
+                        },
+                        "404": {"description": "User not found"},
+                    },
+                },
+            },
+            "/v1/orders": {
+                "post": {
+                    "operationId": "createOrder",
+                    "summary": "Create a new order",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/CreateOrderRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Created",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/Order"}
+                                }
+                            },
+                        }
+                    },
+                },
+            },
+        },
+        "components": {
+            "schemas": {
+                "User": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "email": {"type": "string", "format": "email"},
+                        "name": {"type": "string"},
+                        "created_at": {"type": "string", "format": "date-time"},
+                        "plan": {"type": "string", "enum": ["free", "pro", "enterprise"]},
+                    },
+                    "required": ["id", "email", "name", "created_at", "plan"],
+                },
+                "CreateUserRequest": {
+                    "type": "object",
+                    "properties": {
+                        "email": {"type": "string", "format": "email"},
+                        "name": {"type": "string"},
+                        "plan": {"type": "string", "enum": ["free", "pro", "enterprise"]},
+                    },
+                    "required": ["email", "name"],
+                },
+                "Order": {
+                    "type": "object",
+                    "properties": {
+                        "order_id": {"type": "string", "format": "uuid"},
+                        "customer_id": {"type": "integer"},
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "sku": {"type": "string"},
+                                    "quantity": {"type": "integer", "minimum": 1},
+                                    "unit_price": {"type": "number"},
+                                },
+                                "required": ["sku", "quantity", "unit_price"],
+                            },
+                        },
+                        "total": {"type": "number"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "confirmed", "shipped", "delivered"],
+                        },
+                    },
+                    "required": ["order_id", "customer_id", "items", "total", "status"],
+                },
+                "CreateOrderRequest": {
+                    "type": "object",
+                    "properties": {
+                        "customer_id": {"type": "integer"},
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "sku": {"type": "string"},
+                                    "quantity": {"type": "integer", "minimum": 1},
+                                },
+                                "required": ["sku", "quantity"],
+                            },
+                        },
+                    },
+                    "required": ["customer_id", "items"],
+                },
+            }
+        },
+    }
+
+    try:
+        resp = httpx.post(
+            f"{API_URL}/api/v1/sync/openapi",
+            json={
+                "spec": openapi_spec,
+                "owner_team_id": team_id,
+                "auto_publish_contracts": True,
+            },
+            headers=get_headers(),
+            timeout=60,
+        )
+
+        if resp.status_code == 200:
+            result = resp.json()
+            assets_created = result.get("assets_created", 0)
+            contracts = result.get("contracts_published", 0)
+            print(f"  Imported OpenAPI spec: {result.get('api_title', 'Unknown')}")
+            print(f"    Endpoints found: {result.get('endpoints_found', 0)}")
+            print(f"    Assets created: {assets_created}")
+            print(f"    Contracts published: {contracts}")
+        else:
+            print(f"  Failed to import OpenAPI: {resp.status_code} - {resp.text[:100]}")
+
+    except httpx.RequestError as e:
+        print(f"  Error importing OpenAPI: {e}")
+
+    return assets_created
+
+
+def import_graphql_schema(team_ids: dict[str, str]) -> int:
+    """Import GraphQL schema via the /sync/graphql endpoint.
+
+    This demonstrates how Tessera imports GraphQL API contracts from introspection results.
+    """
+    print("\nImporting GraphQL schema via /sync/graphql...")
+    assets_created = 0
+
+    team_id = team_ids.get("marketing-analytics")
+    if not team_id:
+        print("  Skipping: marketing-analytics team not found")
+        return 0
+
+    # Sample GraphQL introspection result representing an Analytics API
+    introspection = {
+        "__schema": {
+            "queryType": {"name": "Query"},
+            "mutationType": {"name": "Mutation"},
+            "types": [
+                {
+                    "kind": "OBJECT",
+                    "name": "Query",
+                    "fields": [
+                        {
+                            "name": "campaigns",
+                            "description": "List all marketing campaigns",
+                            "args": [
+                                {
+                                    "name": "status",
+                                    "type": {"kind": "ENUM", "name": "CampaignStatus"},
+                                },
+                                {
+                                    "name": "limit",
+                                    "type": {"kind": "SCALAR", "name": "Int"},
+                                },
+                            ],
+                            "type": {
+                                "kind": "LIST",
+                                "ofType": {"kind": "OBJECT", "name": "Campaign"},
+                            },
+                        },
+                        {
+                            "name": "campaign",
+                            "description": "Get a campaign by ID",
+                            "args": [
+                                {
+                                    "name": "id",
+                                    "type": {
+                                        "kind": "NON_NULL",
+                                        "ofType": {"kind": "SCALAR", "name": "ID"},
+                                    },
+                                }
+                            ],
+                            "type": {"kind": "OBJECT", "name": "Campaign"},
+                        },
+                        {
+                            "name": "campaignMetrics",
+                            "description": "Get performance metrics for a campaign",
+                            "args": [
+                                {
+                                    "name": "campaignId",
+                                    "type": {
+                                        "kind": "NON_NULL",
+                                        "ofType": {"kind": "SCALAR", "name": "ID"},
+                                    },
+                                },
+                                {
+                                    "name": "startDate",
+                                    "type": {"kind": "SCALAR", "name": "String"},
+                                },
+                                {
+                                    "name": "endDate",
+                                    "type": {"kind": "SCALAR", "name": "String"},
+                                },
+                            ],
+                            "type": {"kind": "OBJECT", "name": "CampaignMetrics"},
+                        },
+                    ],
+                },
+                {
+                    "kind": "OBJECT",
+                    "name": "Mutation",
+                    "fields": [
+                        {
+                            "name": "createCampaign",
+                            "description": "Create a new marketing campaign",
+                            "args": [
+                                {
+                                    "name": "input",
+                                    "type": {
+                                        "kind": "NON_NULL",
+                                        "ofType": {
+                                            "kind": "INPUT_OBJECT",
+                                            "name": "CreateCampaignInput",
+                                        },
+                                    },
+                                }
+                            ],
+                            "type": {"kind": "OBJECT", "name": "Campaign"},
+                        },
+                        {
+                            "name": "updateCampaignStatus",
+                            "description": "Update campaign status",
+                            "args": [
+                                {
+                                    "name": "id",
+                                    "type": {
+                                        "kind": "NON_NULL",
+                                        "ofType": {"kind": "SCALAR", "name": "ID"},
+                                    },
+                                },
+                                {
+                                    "name": "status",
+                                    "type": {
+                                        "kind": "NON_NULL",
+                                        "ofType": {"kind": "ENUM", "name": "CampaignStatus"},
+                                    },
+                                },
+                            ],
+                            "type": {"kind": "OBJECT", "name": "Campaign"},
+                        },
+                    ],
+                },
+                {
+                    "kind": "OBJECT",
+                    "name": "Campaign",
+                    "fields": [
+                        {
+                            "name": "id",
+                            "type": {
+                                "kind": "NON_NULL",
+                                "ofType": {"kind": "SCALAR", "name": "ID"},
+                            },
+                        },
+                        {"name": "name", "type": {"kind": "SCALAR", "name": "String"}},
+                        {"name": "description", "type": {"kind": "SCALAR", "name": "String"}},
+                        {"name": "status", "type": {"kind": "ENUM", "name": "CampaignStatus"}},
+                        {"name": "budget", "type": {"kind": "SCALAR", "name": "Float"}},
+                        {"name": "startDate", "type": {"kind": "SCALAR", "name": "String"}},
+                        {"name": "endDate", "type": {"kind": "SCALAR", "name": "String"}},
+                    ],
+                },
+                {
+                    "kind": "OBJECT",
+                    "name": "CampaignMetrics",
+                    "fields": [
+                        {
+                            "name": "campaignId",
+                            "type": {
+                                "kind": "NON_NULL",
+                                "ofType": {"kind": "SCALAR", "name": "ID"},
+                            },
+                        },
+                        {"name": "impressions", "type": {"kind": "SCALAR", "name": "Int"}},
+                        {"name": "clicks", "type": {"kind": "SCALAR", "name": "Int"}},
+                        {"name": "conversions", "type": {"kind": "SCALAR", "name": "Int"}},
+                        {"name": "spend", "type": {"kind": "SCALAR", "name": "Float"}},
+                        {"name": "revenue", "type": {"kind": "SCALAR", "name": "Float"}},
+                        {"name": "roas", "type": {"kind": "SCALAR", "name": "Float"}},
+                    ],
+                },
+                {
+                    "kind": "ENUM",
+                    "name": "CampaignStatus",
+                    "enumValues": [
+                        {"name": "DRAFT"},
+                        {"name": "ACTIVE"},
+                        {"name": "PAUSED"},
+                        {"name": "ENDED"},
+                    ],
+                },
+                {
+                    "kind": "INPUT_OBJECT",
+                    "name": "CreateCampaignInput",
+                    "inputFields": [
+                        {
+                            "name": "name",
+                            "type": {
+                                "kind": "NON_NULL",
+                                "ofType": {"kind": "SCALAR", "name": "String"},
+                            },
+                        },
+                        {"name": "description", "type": {"kind": "SCALAR", "name": "String"}},
+                        {"name": "budget", "type": {"kind": "SCALAR", "name": "Float"}},
+                        {"name": "startDate", "type": {"kind": "SCALAR", "name": "String"}},
+                        {"name": "endDate", "type": {"kind": "SCALAR", "name": "String"}},
+                    ],
+                },
+            ],
+        }
+    }
+
+    try:
+        resp = httpx.post(
+            f"{API_URL}/api/v1/sync/graphql",
+            json={
+                "introspection": introspection,
+                "owner_team_id": team_id,
+                "schema_name": "Marketing Analytics API",
+                "auto_publish_contracts": True,
+            },
+            headers=get_headers(),
+            timeout=60,
+        )
+
+        if resp.status_code == 200:
+            result = resp.json()
+            assets_created = result.get("assets_created", 0)
+            contracts = result.get("contracts_published", 0)
+            print(f"  Imported GraphQL schema: {result.get('schema_name', 'Unknown')}")
+            print(f"    Operations found: {result.get('operations_found', 0)}")
+            print(f"    Assets created: {assets_created}")
+            print(f"    Contracts published: {contracts}")
+        else:
+            print(f"  Failed to import GraphQL: {resp.status_code} - {resp.text[:100]}")
+
+    except httpx.RequestError as e:
+        print(f"  Error importing GraphQL: {e}")
+
+    return assets_created
+
+
+def get_model_fqn_for_test(test_node: dict, manifest: dict) -> str | None:
+    """Get the FQN of the model that a test depends on.
+
+    Uses database.schema.name format which matches how Tessera stores FQNs
+    from dbt manifest imports.
+    """
+    depends_on = test_node.get("depends_on", {}).get("nodes", [])
+
+    for node_id in depends_on:
+        if node_id.startswith("model.") or node_id.startswith("source."):
+            node = manifest.get("nodes", {}).get(node_id) or manifest.get("sources", {}).get(
+                node_id
+            )
+            if node:
+                # Use database.schema.name format (matches Tessera's FQN storage)
+                database = node.get("database", "")
+                schema = node.get("schema", "")
+                name = node.get("name", "")
+                return f"{database}.{schema}.{name}".lower()
+    return None
+
+
+def extract_test_results_from_run(run_results: dict, manifest: dict) -> dict[str, dict]:
+    """Extract test results grouped by model FQN from dbt run_results.json.
+
+    Returns:
+        Dict mapping model FQN to {
+            "passed": int,
+            "failed": int,
+            "errored": int,
+            "skipped": int,
+            "failed_tests": [{"name": str, "message": str}]
+        }
+    """
+    from collections import defaultdict
+
+    results_by_model: dict[str, dict] = defaultdict(
+        lambda: {"passed": 0, "failed": 0, "errored": 0, "skipped": 0, "failed_tests": []}
+    )
+
+    for result in run_results.get("results", []):
+        unique_id = result.get("unique_id", "")
+        if not unique_id.startswith("test."):
+            continue
+
+        test_node = manifest.get("nodes", {}).get(unique_id, {})
+        if not test_node:
+            continue
+
+        model_fqn = get_model_fqn_for_test(test_node, manifest)
+        if not model_fqn:
+            continue
+
+        status = result.get("status", "").lower()
+        model_results = results_by_model[model_fqn]
+
+        if status == "pass":
+            model_results["passed"] += 1
+        elif status == "fail":
+            model_results["failed"] += 1
+            model_results["failed_tests"].append(
+                {
+                    "name": test_node.get("name", unique_id),
+                    "message": result.get("message", "Test failed"),
+                    "unique_id": unique_id,
+                }
+            )
+        elif status == "error":
+            model_results["errored"] += 1
+            model_results["failed_tests"].append(
+                {
+                    "name": test_node.get("name", unique_id),
+                    "message": result.get("message", "Test errored"),
+                    "unique_id": unique_id,
+                }
+            )
+        elif status == "skipped":
+            model_results["skipped"] += 1
+
+    return dict(results_by_model)
+
+
+def report_dbt_test_results() -> int:
+    """Report REAL dbt test results from run_results.json to Tessera.
+
+    This reads the actual test outcomes from dbt build runs and reports
+    them to Tessera's audit endpoint. This is the proper WAP pattern -
+    real test results, not fake seeded data.
+    """
+    print("\nReporting dbt test results (WAP demo)...")
+    audits_reported = 0
+
+    for project_name, config in DBT_PROJECTS.items():
+        manifest_path = config["manifest_path"]
+        run_results_path = manifest_path.parent / "run_results.json"
+
+        if not manifest_path.exists():
+            print(f"  Skipping {project_name}: no manifest.json")
+            continue
+
+        if not run_results_path.exists():
+            print(f"  Skipping {project_name}: no run_results.json")
+            continue
+
+        print(f"\n  Processing {project_name} project...")
+
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            run_results = json.loads(run_results_path.read_text())
+
+            invocation_id = run_results.get("metadata", {}).get("invocation_id", "unknown")
+            results_by_model = extract_test_results_from_run(run_results, manifest)
+
+            if not results_by_model:
+                print(f"    No test results found in {project_name}")
+                continue
+
+            print(f"    Found test results for {len(results_by_model)} models")
+
+            for model_fqn, results in results_by_model.items():
+                # Look up asset by FQN
+                try:
+                    asset_resp = httpx.get(
+                        f"{API_URL}/api/v1/assets",
+                        params={"fqn": model_fqn, "limit": 1},
+                        headers=get_headers(),
+                        timeout=10,
+                    )
+                    if asset_resp.status_code != 200:
+                        print(f"      Lookup failed for {model_fqn}: {asset_resp.status_code}")
+                        continue
+
+                    assets = asset_resp.json().get("results", [])
+                    if not assets:
+                        # Try partial match (search for model name anywhere in FQN)
+                        parts = model_fqn.split(".")
+                        model_name = parts[-1] if parts else model_fqn
+                        asset_resp = httpx.get(
+                            f"{API_URL}/api/v1/assets",
+                            params={"search": model_name, "resource_type": "model", "limit": 5},
+                            headers=get_headers(),
+                            timeout=10,
+                        )
+                        if asset_resp.status_code == 200:
+                            all_assets = asset_resp.json().get("results", [])
+                            # Find exact match by model name
+                            assets = [
+                                a for a in all_assets if a.get("fqn", "").endswith(f".{model_name}")
+                            ]
+                        if not assets:
+                            print(f"      Asset not found: {model_fqn}")
+                            continue
+
+                    asset_id = assets[0]["id"]
+
+                    # Calculate totals
+                    total_checked = results["passed"] + results["failed"] + results["errored"]
+                    total_failed = results["failed"] + results["errored"]
+
+                    if total_checked == 0:
+                        continue
+
+                    # Determine status
+                    if total_failed > 0:
+                        status = "failed"
+                    elif results["skipped"] > 0 and results["passed"] == 0:
+                        status = "partial"
+                    else:
+                        status = "passed"
+
+                    payload = {
+                        "status": status,
+                        "guarantees_checked": total_checked,
+                        "guarantees_passed": results["passed"],
+                        "guarantees_failed": total_failed,
+                        "triggered_by": "dbt_test",
+                        "run_id": invocation_id,
+                        "details": {
+                            "failed_tests": results["failed_tests"],
+                            "skipped": results["skipped"],
+                            "project": project_name,
+                        },
+                    }
+
+                    resp = httpx.post(
+                        f"{API_URL}/api/v1/assets/{asset_id}/audit-results",
+                        json=payload,
+                        headers=get_headers(),
+                        timeout=10,
+                    )
+                    if resp.status_code in (200, 201):
+                        audits_reported += 1
+                        print(
+                            f"      {model_fqn}: {status} "
+                            f"({results['passed']}/{total_checked} passed)"
+                        )
+
+                except httpx.RequestError:
+                    continue
+
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"    Error reading artifacts: {e}")
+            continue
+
+    return audits_reported
 
 
 def create_proposals(team_ids: dict[str, str]) -> int:
@@ -432,7 +1257,7 @@ def main() -> int:
         return 1
 
     # Create teams
-    print("\n[1/4] Creating teams...")
+    print("\n[1/7] Creating teams...")
     team_ids: dict[str, str] = {}
     for team in TEAMS:
         team_id = create_team(team["name"], team.get("metadata"))
@@ -446,7 +1271,7 @@ def main() -> int:
     print(f"  Total: {len(team_ids)} teams")
 
     # Create demo users with login credentials first
-    print("\n[2/5] Creating demo login users...")
+    print("\n[2/7] Creating demo login users...")
     demo_users_created = 0
     for user in DEMO_USERS:
         team_id = team_ids.get(user["team"])
@@ -464,7 +1289,7 @@ def main() -> int:
     print(f"  Total: {demo_users_created} demo users")
 
     # Create regular users
-    print("\n[3/5] Creating users...")
+    print("\n[3/7] Creating users...")
     users_created = 0
     for user in USERS:
         team_id = team_ids.get(user["team"])
@@ -480,7 +1305,7 @@ def main() -> int:
 
     # Fall back to synthetic manifest if no real dbt projects found
     if multi_project_result["projects_imported"] == 0:
-        print("\n[4b] No real dbt projects found, using synthetic manifest...")
+        print("\n  No real dbt projects found, using synthetic manifest...")
         default_team_id = team_ids.get("data-platform") or list(team_ids.values())[0]
         import_result = import_manifest(default_team_id)
         if not import_result:
@@ -497,8 +1322,28 @@ def main() -> int:
         print(f"    Total Contracts: {multi_project_result['total_contracts']}")
         print(f"    Total Guarantees: {multi_project_result['total_guarantees']}")
 
+    # Create Kafka assets with Avro schemas
+    print("\n[5/9] Creating Kafka assets with Avro schemas...")
+    kafka_assets = create_kafka_assets(team_ids)
+    print(f"  Total: {kafka_assets} Kafka assets with Avro contracts")
+
+    # Import OpenAPI spec (REST endpoints)
+    print("\n[6/9] Importing OpenAPI spec (REST endpoints)...")
+    openapi_assets = import_openapi_spec(team_ids)
+    print(f"  Total: {openapi_assets} REST API assets")
+
+    # Import GraphQL schema
+    print("\n[7/9] Importing GraphQL schema...")
+    graphql_assets = import_graphql_schema(team_ids)
+    print(f"  Total: {graphql_assets} GraphQL assets")
+
+    # Report real dbt test results (WAP demo)
+    print("\n[8/9] Reporting dbt test results (WAP demo)...")
+    audit_results = report_dbt_test_results()
+    print(f"  Total: {audit_results} audit results reported")
+
     # Create proposals
-    print("\n[5/5] Creating sample proposals...")
+    print("\n[9/9] Creating sample proposals...")
     proposals = create_proposals(team_ids)
     print(f"  Total: {proposals} proposals")
 
@@ -513,6 +1358,10 @@ def main() -> int:
         print(f"  Assets: {import_result['assets']['created']}")
         print(f"  Contracts: {import_result['contracts']['published']}")
         print(f"  Registrations: {import_result['registrations']['created']}")
+    print(f"  Kafka Assets (Avro): {kafka_assets}")
+    print(f"  OpenAPI Assets (REST): {openapi_assets}")
+    print(f"  GraphQL Assets: {graphql_assets}")
+    print(f"  Audit Results (WAP): {audit_results}")
     print(f"  Proposals: {proposals}")
     print("=" * 60)
     print("\nDemo Login Credentials:")
