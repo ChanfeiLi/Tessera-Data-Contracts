@@ -770,8 +770,7 @@ async def file_objection(
     affected_team_ids = {t.get("team_id") for t in proposal.affected_teams}
     if str(objector_team_id) not in affected_team_ids:
         raise ForbiddenError(
-            "Only affected teams can file objections. "
-            "Your team is not downstream of this asset.",
+            "Only affected teams can file objections. Your team is not downstream of this asset.",
             code=ErrorCode.FORBIDDEN,
             extra={"code": "NOT_AFFECTED_TEAM"},
         )

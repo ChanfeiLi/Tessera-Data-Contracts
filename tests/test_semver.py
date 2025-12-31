@@ -273,9 +273,9 @@ class TestEnforceSemverMode:
         )
         assert resp.status_code == 400
         data = resp.json()
-        assert data["code"] == "INVALID_VERSION"
-        assert "version_suggestion" in data["details"]
-        assert data["details"]["version_suggestion"]["suggested_version"] == "1.1.0"
+        assert data["error"]["code"] == "INVALID_VERSION"
+        assert "version_suggestion" in data["error"]["details"]
+        assert data["error"]["details"]["version_suggestion"]["suggested_version"] == "1.1.0"
 
     async def test_enforce_mode_accepts_correct_version(self, client: AsyncClient):
         """ENFORCE mode accepts version that matches change type."""
@@ -385,8 +385,8 @@ class TestEnforceSemverMode:
         )
         assert resp.status_code == 400
         data = resp.json()
-        assert data["code"] == "INVALID_VERSION"
-        assert "major version bump" in data["detail"].lower()
+        assert data["error"]["code"] == "INVALID_VERSION"
+        assert "major version bump" in data["error"]["message"].lower()
 
 
 class TestVersionValidation:
@@ -429,7 +429,7 @@ class TestVersionValidation:
             json={"schema": schema_v2, "version": "1.5.0"},  # Lower than 2.0.0
         )
         assert resp.status_code == 400
-        assert "must be greater than" in resp.json()["detail"].lower()
+        assert "must be greater than" in resp.json()["error"]["message"].lower()
 
 
 class TestVersionSuggestionModel:

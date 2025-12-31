@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -786,7 +787,7 @@ async def create_contract(
     ),
     _: None = RequireWrite,
     session: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """Publish a new contract for an asset.
 
     Requires write scope.
@@ -944,16 +945,19 @@ async def create_contract(
     if contract.version is None:
         # No version provided by user
         if semver_mode == SemverMode.SUGGEST:
-            # Return suggestion instead of auto-generating
+            # Return suggestion instead of auto-generating (200 since nothing created)
             msg = (
                 "Version not provided. Please review the suggested version "
                 "and re-submit with an explicit version."
             )
-            return {
-                "action": "version_required",
-                "message": msg,
-                "version_suggestion": version_suggestion.model_dump(),
-            }
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "action": "version_required",
+                    "message": msg,
+                    "version_suggestion": version_suggestion.model_dump(),
+                },
+            )
         else:
             # AUTO mode: auto-generate version
             version_auto_generated = True
