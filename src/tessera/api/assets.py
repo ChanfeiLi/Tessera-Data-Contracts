@@ -460,7 +460,7 @@ async def list_assets(
 async def search_assets(
     request: Request,
     auth: Auth,
-    q: str = Query(..., min_length=1, description="Search query"),
+    q: str = Query(..., min_length=1, max_length=100, description="Search query"),
     owner: UUID | None = Query(None, description="Filter by owner team ID"),
     environment: str | None = Query(None, description="Filter by environment"),
     limit: int = Query(
@@ -468,6 +468,10 @@ async def search_assets(
         ge=1,
         le=settings.pagination_limit_max,
         description="Results per page",
+        error_messages={
+            "string_too_long": "Search query must not exceed 100 characters",
+            "string_too_short": "Search query must be at least 1 character"
+        }
     ),
     offset: int = Query(0, ge=0, description="Pagination offset"),
     _: None = RequireRead,
