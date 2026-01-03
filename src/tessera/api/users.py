@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tessera.api.auth import Auth, RequireAdmin, RequireRead
+from tessera.api.errors import DuplicateError, ErrorCode
 from tessera.api.pagination import PaginationParams, pagination_params
 from tessera.api.rate_limit import limit_read, limit_write
 from tessera.db import AssetDB, TeamDB, UserDB, get_session
@@ -62,9 +63,10 @@ async def create_user(
         await session.flush()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(
-            status_code=409, detail=f"User with email '{user.email}' already exists"
-        )
+        raise DuplicateError(
+            ErrorCode.DUPLICATE_USER,
+            f"User with email '{user.email}' already exists"
+)
     await session.refresh(db_user)
 
     # Audit log user creation
@@ -237,8 +239,9 @@ async def update_user(
         await session.flush()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(
-            status_code=409, detail=f"User with email '{update.email}' already exists"
+        raise DuplicateError(
+            ErrorCode.DUPLICATE_USER,
+            f"User with email '{user.email}' already exists"
         )
     await session.refresh(user)
 
